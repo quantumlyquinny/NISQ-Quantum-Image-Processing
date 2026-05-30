@@ -1,0 +1,7 @@
+# Python Environment
+venv/
+__pycache__/
+
+# Security and Credentials
+.env
+qiskit_ibm_credentials.json
