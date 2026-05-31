@@ -1,77 +1,76 @@
 """
-entangled_transmission.py — Protocol 2: Entangled Bell-Pair Transmission
+ibm_hardware_execution.py — Physical QPU Execution via Qiskit Runtime SamplerV2
 
-Implements a QKD-inspired secure transmission protocol using entangled Bell pairs.
-Each pixel is encoded into one half of an entangled pair (Alice's qubit), while
-the other half (Bob's qubit) travels through a simulated noisy quantum channel.
+Executes the basis encoding protocol on real IBM superconducting quantum hardware,
+bypassing local simulation entirely. Uses Qiskit Runtime Primitives (SamplerV2)
+for modern job submission and result retrieval.
 
-Security Mechanism: Any interception or measurement of Bob's qubit during transit
-forces wave-function collapse, degrading the entanglement and producing a
-measurable increase in Quantum Bit Error Rate (QBER). A QBER exceeding ~11%
-statistically proves channel compromise — this threshold is derived from the
-information-theoretic security proof of QKD protocols.
+Hardware Target: Least busy operational IBM QPU (e.g., Eagle r3 architecture).
+Credentials: Loaded from .env file — never hardcoded.
 
-Encoding: Phase encoding via Pauli-Z gates on Alice's qubits.
-    pixel = 0 → |Φ+⟩ Bell state (no Z applied)
-    pixel = 1 → |Φ-⟩ Bell state (Z applied, phase flip)
+Key distinction from simulation: results reflect authentic hardware noise sources
+including T1/T2 decoherence, gate calibration drift, crosstalk between physical
+qubits, and measurement apparatus imperfections — none of which are fully
+captured by classical noise models.
 
-Decoding: Bell measurement (reverse CNOT + Hadamard) recovers Alice's bits at Bob.
-
-Trade-off vs Basis Encoding: Doubles qubit count (32 qubits for a 4x4 image),
-adds moderate circuit depth through two-qubit CNOT gates, but provides
-provable tamper-detection that basis encoding fundamentally cannot offer.
-
-References:
-    Ekert, A. K. (1991). Quantum cryptography based on Bell's theorem.
-    Physical Review Letters, 67(6), 661.
-
-    Bennett, C. H., & Brassard, G. (1984). Quantum cryptography: Public key
-    distribution and coin tossing. Proceedings of IEEE ICCSS, 175-179.
+Reference:
+    Preskill, J. (2018). Quantum Computing in the NISQ era and beyond.
+    Quantum, 2, 79. https://doi.org/10.22331/q-2018-08-06-79
 """
 
 import os
 import json
 import numpy as np
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timezone
+from dotenv import load_dotenv
 from qiskit import QuantumCircuit, transpile
-from qiskit_aer import AerSimulator
-from qiskit_aer.noise import NoiseModel, depolarizing_error, ReadoutError
+from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
 
 # --- Configuration ---
-# Depolarising error rate on Bob's transit qubits.
-# Models environmental decoherence during transmission.
-# At 15%, simulates a heavily degraded channel for visibility.
-# Real fibre-optic quantum channels: ~1-5% depending on distance.
-CHANNEL_ERROR_RATE = 0.15
-
-# Gate error rate on two-qubit CNOT operations.
-# IBM Eagle r3 typical two-qubit gate error: ~0.5-1.0%.
-CNOT_ERROR_RATE = 0.005
-
-# Readout error rate consistent with IBM Eagle r3 calibrations.
-READOUT_ERROR_RATE = 0.02
-
-# QBER threshold above which channel compromise is statistically proven.
-# Derived from QKD security proofs — intercept-resend attacks produce ~25% QBER;
-# 11% is the conventional security boundary below which Eve gains no information.
-QBER_SECURITY_THRESHOLD = 11.0
-
-# 1024 shots: minimum for statistically valid QBER estimation.
+# 1024 shots: minimum for statistically valid fidelity reconstruction.
+# Standard error on probability estimate: ~1/sqrt(1024) ~ 3%.
+# shots=1 produces a single random sample — not a meaningful fidelity metric.
 NUM_SHOTS = 1024
 
 RESULTS_DIR = "docs/results"
-RESULTS_FILE = os.path.join(RESULTS_DIR, "entangled_transmission_results.json")
-PLOT_FILE = os.path.join(RESULTS_DIR, "entangled_transmission_comparison.png")
+RESULTS_FILE = os.path.join(RESULTS_DIR, "hardware_execution_results.json")
+PLOT_FILE = os.path.join(RESULTS_DIR, "hardware_qber_comparison.png")
+
+
+def load_credentials() -> tuple[str, str]:
+    """
+    Loads IBM Quantum credentials from environment variables.
+
+    Credentials are stored in a .env file and never hardcoded.
+    See .env.example for required variable names.
+
+    Returns:
+        Tuple of (api_key, crn_instance).
+
+    Raises:
+        EnvironmentError: If required credentials are missing.
+    """
+    load_dotenv()
+    api_key = os.getenv("IBM_API_KEY")
+    crn = os.getenv("IBM_CRN")
+
+    if not api_key or not crn:
+        raise EnvironmentError(
+            "Missing IBM Quantum credentials. "
+            "Ensure IBM_API_KEY and IBM_CRN are set in your .env file. "
+            "See .env.example for reference."
+        )
+    return api_key, crn
 
 
 def create_payload() -> np.ndarray:
     """
     Generates the 4x4 binary cross-pattern image payload.
 
-    Consistent across all protocols to enable direct fidelity comparison.
-    12 active pixels (value=1) and 4 inactive pixels (value=0) provide
-    a balanced test case for both bit states.
+    This specific pattern (12 active pixels, 4 inactive) provides a
+    balanced test case — neither all-zeros nor all-ones — ensuring
+    meaningful fidelity measurement across both bit states.
 
     Returns:
         np.ndarray: 4x4 binary matrix, dtype uint8.
@@ -84,128 +83,76 @@ def create_payload() -> np.ndarray:
     ], dtype=np.uint8)
 
 
-def build_entangled_circuit(image_matrix: np.ndarray) -> QuantumCircuit:
+def build_circuit(image_matrix: np.ndarray) -> QuantumCircuit:
     """
-    Constructs the Bell-pair entangled transmission circuit.
+    Encodes a binary image into a quantum register via computational basis encoding.
 
-    Circuit Architecture (per pixel pair):
-      Qubit i*2   → Alice's qubit (encodes payload, measured at receiver)
-      Qubit i*2+1 → Bob's qubit (travels through channel, subject to noise)
+    Encoding scheme: pixel p_i maps to qubit q_i.
+        p_i = 0 → |0⟩ (no gate applied, default qubit state)
+        p_i = 1 → |1⟩ (Pauli-X gate applied)
 
-    Phase 1 — Bell State Preparation:
-      H gate on Alice's qubit creates superposition: |0⟩ → (|0⟩ + |1⟩)/√2
-      CNOT entangles Alice and Bob: creates |Φ+⟩ = (|00⟩ + |11⟩)/√2
-
-    Phase 2 — Payload Encoding (Alice):
-      Z gate on Alice's qubit for pixel=1 flips the Bell state:
-      |Φ+⟩ → |Φ-⟩ = (|00⟩ - |11⟩)/√2
-      This phase difference encodes the classical bit without disturbing
-      the entanglement structure — preserving tamper-detection capability.
-
-    Phase 3 — Transmission Channel:
-      Identity gates on Bob's qubits represent transit time.
-      Noise model targets these gates to simulate channel decoherence.
-
-    Phase 4 — Bell Measurement (Bob decodes):
-      Reverse CNOT + H recovers Alice's classical bits at Bob's side.
+    Circuit depth is O(n) where n = number of pixels, using only single-qubit
+    X gates. This shallow depth makes basis encoding the most NISQ-resilient
+    protocol in the suite — minimal gate error accumulation before measurement.
 
     Args:
         image_matrix: 2D binary numpy array representing the image payload.
 
     Returns:
-        QuantumCircuit: Full entangled transmission circuit with measurements.
+        QuantumCircuit: Prepared circuit with measurement operations appended.
     """
     flat_image = image_matrix.flatten()
-    num_pixels = len(flat_image)
-    num_qubits = num_pixels * 2  # Two qubits per pixel: Alice + Bob
+    num_qubits = len(flat_image)
 
     qc = QuantumCircuit(num_qubits)
-
-    # Phase 1: Bell state preparation for each pixel pair
-    for i in range(num_pixels):
-        alice = i * 2
-        bob = i * 2 + 1
-        qc.h(alice)
-        qc.cx(alice, bob)
-
-    qc.barrier(label="channel_entry")
-
-    # Phase 2: Alice encodes payload via phase flip (Z gate)
-    # Z gate: |Φ+⟩ → |Φ-⟩, encoding bit=1 as a phase difference
     for idx, pixel in enumerate(flat_image):
         if pixel == 1:
-            qc.z(idx * 2)
-
-    # Phase 3: Explicit transmission channel representation
-    # Identity gates on Bob's qubits — noise model targets these
-    # to simulate decoherence during physical channel transit
-    for i in range(num_pixels):
-        qc.id(i * 2 + 1)
-
-    qc.barrier(label="channel_exit")
-
-    # Phase 4: Bell measurement — Bob reverses the entanglement to decode
-    for i in range(num_pixels):
-        alice = i * 2
-        bob = i * 2 + 1
-        qc.cx(alice, bob)
-        qc.h(alice)
-
+            qc.x(idx)
     qc.measure_all()
     return qc
 
 
-def build_noise_model(num_pixels: int) -> NoiseModel:
+def connect_to_backend(api_key: str, crn: str):
     """
-    Constructs a channel-aware noise model for entangled transmission.
+    Authenticates with IBM Quantum Cloud and selects the optimal QPU.
 
-    Noise sources modelled:
-      1. Depolarising error on Bob's transit qubits during channel passage.
-         Models environmental decoherence — the primary source of QBER
-         increase in real quantum transmission channels.
-      2. Two-qubit gate error on CNOT operations.
-         IBM Eagle r3 typical two-qubit gate fidelity: ~99-99.5%.
-      3. Symmetric readout error on all qubits.
+    Backend selection uses least_busy() to minimise queue wait time.
+    Filters for operational=True and simulator=False to ensure
+    physical hardware execution only.
 
     Args:
-        num_pixels: Number of pixels in the payload (determines qubit count).
+        api_key: IBM Quantum API key.
+        crn: IBM Cloud Resource Name identifying the quantum instance.
 
     Returns:
-        NoiseModel: Configured noise model targeting channel qubits.
+        IBMBackend: Selected physical quantum backend.
     """
-    noise_model = NoiseModel()
+    print(">> Authenticating with IBM Quantum Cloud...")
+    service = QiskitRuntimeService(
+        channel="ibm_cloud",
+        token=api_key,
+        instance=crn
+    )
 
-    # Depolarising noise on Bob's transit qubits (identity gates)
-    channel_error = depolarizing_error(CHANNEL_ERROR_RATE, num_qubits=1)
-    bobs_qubits = [i * 2 + 1 for i in range(num_pixels)]
-    for qubit in bobs_qubits:
-        noise_model.add_quantum_error(channel_error, ['id'], [qubit])
-
-    # Two-qubit gate error on CNOT operations
-    cnot_error = depolarizing_error(CNOT_ERROR_RATE, num_qubits=2)
-    noise_model.add_all_qubit_quantum_error(cnot_error, ['cx'])
-
-    # Symmetric readout error consistent across all qubits
-    readout_error = ReadoutError([
-        [1 - READOUT_ERROR_RATE, READOUT_ERROR_RATE],
-        [READOUT_ERROR_RATE, 1 - READOUT_ERROR_RATE]
-    ])
-    noise_model.add_all_qubit_readout_error(readout_error)
-
-    return noise_model
+    print(">> Selecting least busy physical QPU...")
+    backend = service.least_busy(operational=True, simulator=False)
+    print(f">> Target backend: {backend.name}")
+    print(f"   Qubits available: {backend.num_qubits}")
+    print(f"   Basis gates: {backend.basis_gates}")
+    return backend
 
 
 def reconstruct_image(counts: dict, image_shape: tuple) -> np.ndarray:
     """
-    Reconstructs the received image from Bell measurement outcomes.
+    Reconstructs the transmitted image via maximum likelihood estimation.
 
-    Bell measurement produces a 2n-bit string. Only Alice's qubits (even
-    indices: 0, 2, 4...) carry the decoded payload — Bob's qubits serve
-    as the entanglement verification channel.
+    With NUM_SHOTS measurements, the most frequently observed bitstring
+    represents the maximum likelihood estimate of the transmitted state.
+    This is statistically robust — unlike single-shot sampling which
+    produces an arbitrary sample from the measurement distribution.
 
-    Maximum likelihood reconstruction selects the most frequent
-    measurement outcome across NUM_SHOTS, providing a statistically
-    robust estimate of the transmitted state.
+    Qiskit returns bitstrings in reversed qubit order (q_{n-1}...q_0).
+    We correct this with reversed() before reshaping.
 
     Args:
         counts: Measurement outcome dictionary {bitstring: shot_count}.
@@ -215,142 +162,83 @@ def reconstruct_image(counts: dict, image_shape: tuple) -> np.ndarray:
         np.ndarray: Reconstructed binary image matrix.
     """
     most_probable = max(counts, key=counts.get)
-
-    # Qiskit bitstring ordering: reversed relative to qubit indices
-    # Correct for this before extracting Alice's bits
-    reversed_state = most_probable[::-1]
-
-    # Extract only Alice's qubits (even indices) — these carry the payload
-    num_pixels = image_shape[0] * image_shape[1]
-    decoded_bits = [int(reversed_state[i * 2]) for i in range(num_pixels)]
-
-    return np.array(decoded_bits, dtype=np.uint8).reshape(image_shape)
+    corrected = list(reversed(most_probable))
+    flat = np.array([int(bit) for bit in corrected], dtype=np.uint8)
+    return flat.reshape(image_shape)
 
 
 def compute_metrics(original: np.ndarray,
                     reconstructed: np.ndarray,
-                    apply_noise: bool) -> dict:
+                    backend_name: str) -> dict:
     """
-    Computes QBER and channel security assessment.
-
-    QBER interpretation in QKD context:
-      QBER < 11%  → Channel secure, no eavesdropping detected
-      QBER > 11%  → Channel compromised (Eve's presence statistically proven)
-      QBER ~ 25%  → Consistent with intercept-resend attack
+    Computes transmission fidelity metrics for hardware execution results.
 
     Args:
         original: Ground truth binary image payload.
-        reconstructed: Received and decoded image.
-        apply_noise: Whether noise was applied (for metadata).
+        reconstructed: Hardware-reconstructed image via MLE.
+        backend_name: Name of the QPU used for execution.
 
     Returns:
-        dict: Fidelity metrics including QBER and security assessment.
+        dict: Fidelity metrics including QBER, accuracy, and execution metadata.
     """
     error_count = int(np.sum(original != reconstructed))
     qber = (error_count / original.size) * 100
-    secure = qber < QBER_SECURITY_THRESHOLD
 
     return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "protocol": "entangled_transmission",
-        "noise_applied": apply_noise,
+        "backend": backend_name,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "shots": NUM_SHOTS,
         "total_pixels": int(original.size),
         "error_count": error_count,
         "qber_percent": round(qber, 2),
         "accuracy_percent": round(100 - qber, 2),
-        "channel_secure": secure,
-        "security_threshold_percent": QBER_SECURITY_THRESHOLD,
-        "security_verdict": (
-            "SECURE — QBER below threshold, no eavesdropping detected"
-            if secure else
-            "COMPROMISED — QBER exceeds threshold, channel integrity violated"
-        )
+        "protocol": "basis_encoding",
     }
 
 
-def run_protocol(apply_noise: bool = False) -> tuple:
-    """
-    Executes the full entangled transmission pipeline.
-
-    Args:
-        apply_noise: If True, applies channel decoherence noise model.
-
-    Returns:
-        Tuple of (original image, reconstructed image, metrics dict).
-    """
-    original = create_payload()
-    qc = build_entangled_circuit(original)
-
-    num_pixels = original.size
-    simulator = AerSimulator()
-    noise_model = build_noise_model(num_pixels) if apply_noise else None
-
-    transpiled_qc = transpile(qc, simulator)
-    result = simulator.run(
-        transpiled_qc,
-        noise_model=noise_model,
-        shots=NUM_SHOTS
-    ).result()
-
-    counts = result.get_counts()
-    reconstructed = reconstruct_image(counts, original.shape)
-    metrics = compute_metrics(original, reconstructed, apply_noise)
-
-    return original, reconstructed, metrics
-
-
-def save_results(clean_metrics: dict,
-                 noisy_metrics: dict,
+def save_results(metrics: dict,
                  original: np.ndarray,
-                 clean: np.ndarray,
-                 noisy: np.ndarray) -> None:
+                 reconstructed: np.ndarray) -> None:
     """
-    Persists protocol results for dashboard visualisation and reporting.
+    Persists hardware execution results to disk for dashboard and reporting.
+
+    Saves:
+      - JSON metrics file for the interactive dashboard
+      - PNG comparison plot for the README and academic reporting
 
     Args:
-        clean_metrics: Fidelity metrics from noise-free run.
-        noisy_metrics: Fidelity metrics from noisy channel run.
-        original: Ground truth image.
-        clean: Clean channel reconstruction.
-        noisy: Noisy channel reconstruction.
+        metrics: Fidelity metrics dictionary from compute_metrics().
+        original: Original image payload.
+        reconstructed: Hardware-reconstructed image.
     """
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    combined = {"clean": clean_metrics, "noisy": noisy_metrics}
+    # Persist metrics as JSON for dashboard consumption
     with open(RESULTS_FILE, "w") as f:
-        json.dump(combined, f, indent=2)
-    print(f">> Results saved to {RESULTS_FILE}")
+        json.dump(metrics, f, indent=2)
+    print(f">> Metrics saved to {RESULTS_FILE}")
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    # Generate comparison plot
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
     fig.suptitle(
-        f"Protocol 2: Entangled Transmission — Channel Fidelity Analysis\n"
-        f"Clean QBER: {clean_metrics['qber_percent']}% | "
-        f"Noisy QBER: {noisy_metrics['qber_percent']}% | "
-        f"Security Threshold: {QBER_SECURITY_THRESHOLD}% | "
-        f"Shots: {NUM_SHOTS}",
+        f"Basis Encoding — Physical Hardware Execution\n"
+        f"Backend: {metrics['backend']} | "
+        f"QBER: {metrics['qber_percent']}% | "
+        f"Shots: {metrics['shots']}",
         fontsize=10
     )
 
     axes[0].imshow(original, cmap='Blues', vmin=0, vmax=1)
-    axes[0].set_title("Original Payload\n(Alice's encoding)")
+    axes[0].set_title("Original Payload")
     axes[0].axis('off')
 
-    axes[1].imshow(clean, cmap='Blues', vmin=0, vmax=1)
+    axes[1].imshow(reconstructed, cmap='Reds', vmin=0, vmax=1)
     axes[1].set_title(
-        f"Clean Channel\n"
-        f"QBER: {clean_metrics['qber_percent']}% — "
-        f"{clean_metrics['security_verdict'].split('—')[0].strip()}"
+        f"Hardware Reconstruction\n"
+        f"QBER: {metrics['qber_percent']}% "
+        f"({metrics['error_count']}/{metrics['total_pixels']} pixels)"
     )
     axes[1].axis('off')
-
-    axes[2].imshow(noisy, cmap='Reds', vmin=0, vmax=1)
-    axes[2].set_title(
-        f"Noisy Channel (ε={CHANNEL_ERROR_RATE})\n"
-        f"QBER: {noisy_metrics['qber_percent']}% — "
-        f"{noisy_metrics['security_verdict'].split('—')[0].strip()}"
-    )
-    axes[2].axis('off')
 
     plt.tight_layout()
     plt.savefig(PLOT_FILE, dpi=150, bbox_inches='tight')
@@ -358,25 +246,74 @@ def save_results(clean_metrics: dict,
     print(f">> Comparison plot saved to {PLOT_FILE}")
 
 
+def execute_on_hardware() -> dict:
+    """
+    Orchestrates the full physical QPU execution pipeline.
+
+    Pipeline:
+      1. Load credentials from environment
+      2. Build and encode the image payload circuit
+      3. Authenticate and select backend
+      4. Transpile circuit to backend native gate set
+      5. Submit job via SamplerV2 primitives
+      6. Retrieve results and reconstruct via MLE
+      7. Compute fidelity metrics
+      8. Persist results to disk
+
+    Returns:
+        dict: Fidelity metrics from the hardware run.
+    """
+    api_key, crn = load_credentials()
+    original = create_payload()
+    qc = build_circuit(original)
+
+    backend = connect_to_backend(api_key, crn)
+
+    # Transpile to backend's native gate set and qubit topology.
+    # This step maps our logical circuit onto physical qubit connectivity —
+    # may introduce additional SWAP gates depending on hardware topology.
+    print(">> Transpiling circuit to native gate set...")
+    transpiled_qc = transpile(qc, backend=backend, optimization_level=1)
+    print(f"   Circuit depth after transpilation: {transpiled_qc.depth()}")
+    print(f"   Gate count: {transpiled_qc.size()}")
+
+    print(f">> Submitting job to {backend.name} ({NUM_SHOTS} shots)...")
+    sampler = Sampler(mode=backend)
+    job = sampler.run([transpiled_qc], shots=NUM_SHOTS)
+    print(f">> Job submitted. ID: {job.job_id()}")
+    print(">> Awaiting physical execution (queue time varies by global demand)...")
+
+    result = job.result()
+    counts = result[0].data.meas.get_counts()
+
+    reconstructed = reconstruct_image(counts, original.shape)
+    metrics = compute_metrics(original, reconstructed, backend.name)
+    save_results(metrics, original, reconstructed)
+
+    return metrics
+
+
 if __name__ == "__main__":
     print("=" * 60)
-    print("Protocol 2: Entangled Bell-Pair Transmission")
-    print(f"Channel error: {CHANNEL_ERROR_RATE} | "
-          f"CNOT error: {CNOT_ERROR_RATE} | "
-          f"Shots: {NUM_SHOTS}")
-    print(f"Security threshold: QBER < {QBER_SECURITY_THRESHOLD}%")
+    print("Physical QPU Execution — Basis Encoding Protocol")
+    print(f"Shots: {NUM_SHOTS} | Protocol: Basis Encoding")
     print("=" * 60)
 
-    print("\n[1/2] Running clean channel simulation...")
-    original, clean_output, clean_metrics = run_protocol(apply_noise=False)
-    print(f"      QBER: {clean_metrics['qber_percent']}% | "
-          f"{clean_metrics['security_verdict']}")
+    try:
+        metrics = execute_on_hardware()
+        print("\n" + "=" * 60)
+        print("HARDWARE EXECUTION COMPLETE")
+        print(f"Backend:    {metrics['backend']}")
+        print(f"Timestamp:  {metrics['timestamp']}")
+        print(f"QBER:       {metrics['qber_percent']}%")
+        print(f"Accuracy:   {metrics['accuracy_percent']}%")
+        print(f"Errors:     {metrics['error_count']}/{metrics['total_pixels']} pixels")
+        print("=" * 60)
 
-    print("\n[2/2] Running noisy channel simulation...")
-    _, noisy_output, noisy_metrics = run_protocol(apply_noise=True)
-    print(f"      QBER: {noisy_metrics['qber_percent']}% | "
-          f"{noisy_metrics['security_verdict']}")
-
-    print("\n>> Saving results and generating visualisation...")
-    save_results(clean_metrics, noisy_metrics,
-                 original, clean_output, noisy_output)
+    except EnvironmentError as e:
+        print(f"\n[CREDENTIAL ERROR] {e}")
+    except Exception as e:
+        print(f"\n[EXECUTION ERROR] {e}")
+        print("Common causes: expired API key, no available backends, "
+              "network timeout, or job queue rejection.")
+        raise
