@@ -1,0 +1,32 @@
+{
+  "clean": {
+    "timestamp": "2026-05-31T15:55:45.540223+00:00",
+    "protocol": "amplitude_encoding",
+    "noise_applied": false,
+    "shots": 8192,
+    "total_pixels": 16,
+    "error_count": 0,
+    "qber_percent": 0.0,
+    "accuracy_percent": 100.0,
+    "circuit_depth": 16,
+    "cx_gate_count": 8,
+    "u_gate_count": 12,
+    "total_gates": 25,
+    "nisq_verdict": "INTACT \u2014 Clean simulation (noise-free baseline)"
+  },
+  "noisy": {
+    "timestamp": "2026-05-31T15:55:45.720739+00:00",
+    "protocol": "amplitude_encoding",
+    "noise_applied": true,
+    "shots": 8192,
+    "total_pixels": 16,
+    "error_count": 4,
+    "qber_percent": 25.0,
+    "accuracy_percent": 75.0,
+    "circuit_depth": 16,
+    "cx_gate_count": 8,
+    "u_gate_count": 12,
+    "total_gates": 25,
+    "nisq_verdict": "DEGRADED \u2014 Deep CNOT network exceeds NISQ noise tolerance"
+  }
+}
