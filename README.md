@@ -72,12 +72,12 @@ In the NISQ era, quantum engineers cannot optimise for every variable simultaneo
 
 ## Quantitative Protocol Comparison
 
-| Protocol | Qubit Cost (4×4 image) | Primary Gates | Circuit Depth | Expected Physical QBER | NISQ Viability |
+| Protocol | Qubit Cost (4×4 image) | Primary Gates | Circuit Depth | Simulated QBER (Noisy) | NISQ Viability |
 |:---|:---:|:---:|:---:|:---:|:---:|
-| Basis Encoding | 16 | `X` | Very Low | ~0.00% | 🟢 Excellent |
+| Basis Encoding | 16 | `X` | 1 | ~0.00% | 🟢 Excellent |
 | Entangled Transmission | 32 | `H`, `CX` | Moderate | ~18.75% | 🟡 Moderate |
-| Quantum Watermarking | 16 | `H`, `X` | Low | ~12.50% | 🟢 High |
-| Amplitude Encoding | **4** | State Prep | **Severe** | ~25.00%+ | 🔴 Fragile |
+| Quantum Watermarking | 16 | `H`, `X` | Low | ~11.00% | 🟢 High |
+| Amplitude Encoding | 4 | `U`, `CX` | 16 | 25.00% | 🔴 Fragile |
 
 *Expected Physical QBER reflects performance under high-noise physical channel conditions.*  
 *See the [Interactive Dashboard](https://quantumlyquinny.github.io/NISQ-Quantum-Image-Processing/) for live simulation results and noise comparison plots.*
@@ -194,14 +194,14 @@ NISQ-Quantum-Image-Processing/
 │   │   ├── basis_encoding.py
 │   │   ├── entangled_transmission.py
 │   │   ├── quantum_watermarking.py
-│   │   └── amplitude_encoding.py
+│   │   └── amplitude_encode.py         
 │   └── ibm_hardware_execution.py
 ├── docs/
 │   └── results/
-│       ├── noise_comparison.png
-│       ├── qber_measurement.png
-│       ├── amplitude_reconstruction.png
-│       └── circuit_depth_comparison.png
+│       ├── basis_encoding_comparison.png
+│       ├── entangled_transmission_comparison.png
+│       ├── quantum_watermarking_comparison.png
+│       └── amplitude_encoding_comparison.png
 ├── .env.example
 ├── requirements.txt
 ├── LICENSE
@@ -212,13 +212,28 @@ NISQ-Quantum-Image-Processing/
 
 ## Key Findings
 
-The hardware execution results confirm the central thesis of this project:
+**Shallow circuits survive NISQ hardware.** Basis encoding (circuit depth: 1, zero 
+CX gates) maintained 0.00% QBER under both simulation and physical hardware execution. 
+Quantum watermarking similarly preserved payload fidelity, with sentinel QBER rising 
+to ~11% under channel noise — remaining below the 25% integrity violation threshold.
 
-**Shallow circuits survive NISQ hardware.** Basis encoding and quantum watermarking, both relying on single-qubit gates with minimal depth, maintained meaningful fidelity on physical hardware. The noise floor of current superconducting processors is manageable for low-depth circuits.
+**Entanglement degrades predictably.** The entangled transmission protocol produced 
+18.75% QBER under noisy channel simulation, consistent with the theoretical prediction 
+for Bell-pair degradation under depolarising noise. This validates entanglement 
+degradation as a physically reliable tamper-detection signal.
 
-**Entanglement degrades predictably.** The entangled transmission protocol produced QBER measurements consistent with theoretical predictions under hardware noise — validating that Bell pair degradation can serve as a tamper-detection signal even on NISQ devices.
+**Amplitude encoding is not yet practical.** At CX gate error rate ε=0.10, amplitude 
+encoding produced 25.00% QBER — a complete payload reconstruction failure. The 
+Möttönen state preparation compiles into 8 CX gates at circuit depth 16, accumulating 
+errors multiplicatively across the gate network. Basis encoding achieves the same task 
+at depth 1 with zero CX gates. The 16× depth increase is the quantitative explanation 
+for amplitude encoding's NISQ fragility.
 
-**Amplitude encoding is not yet practical.** The exponential compression promised by amplitude encoding collapses on real hardware. Dense CNOT compilation amplifies hardware errors beyond recovery at current noise levels, confirming that this architecture requires fault-tolerant quantum hardware to be viable.
+**Note on simulation vs hardware error rates:** Our simulation uses ε=0.10 for CX 
+gates to produce visible degradation on a 4-qubit circuit. IBM Eagle r3 hardware 
+reports typical CX fidelity of 99.0–99.5% (ε≈0.005–0.010). At real hardware error 
+rates, amplitude encoding degrades more gradually on small circuits but fails 
+catastrophically as image resolution — and therefore circuit depth — scales up.
 
 ---
 
