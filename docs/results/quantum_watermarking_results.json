@@ -1,0 +1,32 @@
+{
+  "clean": {
+    "timestamp": "2026-05-31T15:36:10.380473+00:00",
+    "protocol": "quantum_watermarking",
+    "noise_applied": false,
+    "shots": 1024,
+    "total_pixels": 16,
+    "sentinel_count": 8,
+    "data_pixel_count": 8,
+    "payload_error_count": 0,
+    "payload_qber_percent": 0.0,
+    "sentinel_qber_percent": 0.0,
+    "integrity_threshold_percent": 25.0,
+    "integrity_intact": true,
+    "integrity_verdict": "INTACT \u2014 Sentinel QBER below threshold, payload unobserved"
+  },
+  "noisy": {
+    "timestamp": "2026-05-31T15:36:11.180161+00:00",
+    "protocol": "quantum_watermarking",
+    "noise_applied": true,
+    "shots": 1024,
+    "total_pixels": 16,
+    "sentinel_count": 8,
+    "data_pixel_count": 8,
+    "payload_error_count": 0,
+    "payload_qber_percent": 0.0,
+    "sentinel_qber_percent": 11.08,
+    "integrity_threshold_percent": 25.0,
+    "integrity_intact": true,
+    "integrity_verdict": "INTACT \u2014 Sentinel QBER below threshold, payload unobserved"
+  }
+}
