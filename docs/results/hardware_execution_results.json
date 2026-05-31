@@ -1,0 +1,10 @@
+{
+  "backend": "ibm_marrakesh",
+  "timestamp": "2026-05-31T11:44:45.335632",
+  "shots": 1024,
+  "total_pixels": 16,
+  "error_count": 0,
+  "qber_percent": 0.0,
+  "accuracy_percent": 100.0,
+  "protocol": "basis_encoding"
+}

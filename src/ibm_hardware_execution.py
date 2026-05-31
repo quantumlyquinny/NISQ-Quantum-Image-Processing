@@ -22,7 +22,7 @@ import os
 import json
 import numpy as np
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from qiskit import QuantumCircuit, transpile
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
@@ -186,7 +186,7 @@ def compute_metrics(original: np.ndarray,
 
     return {
         "backend": backend_name,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "shots": NUM_SHOTS,
         "total_pixels": int(original.size),
         "error_count": error_count,
